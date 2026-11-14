@@ -4,14 +4,11 @@ compatibility_date = "2026-11-14"
 workers_dev = true
 
 # Durable seen-set for PROOF_REUSED detection across isolates.
-# Create once at deploy time (needs Cloudflare auth):
-#   npx wrangler kv namespace create SEEN_PROOFS
-# then paste the returned id below. Until then the worker falls back to an
-# in-memory set (works, but a reused proof may slip through if the platform
-# hits a fresh isolate).
-# [[kv_namespaces]]
-# binding = "SEEN_PROOFS"
-# id = "PASTE_KV_NAMESPACE_ID_HERE"
+# Created 2026-11-14 via Cloudflare API (custom.cloudflare connector):
+# namespace SEEN_PROOFS id b13ff3311e1a4355b03f1b97e840fcb4.
+[[kv_namespaces]]
+binding = "SEEN_PROOFS"
+id = "b13ff3311e1a4355b03f1b97e840fcb4"
 
 [vars]
 # AGENT_GAMES_HMAC_SECRET must be set as a SECRET, never here:
