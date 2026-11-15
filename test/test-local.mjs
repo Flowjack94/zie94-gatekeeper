@@ -12,15 +12,23 @@ function sign(body) {
   return createHmac("sha256", SECRET).update(body, "utf8").digest("hex");
 }
 
-async function post(bodyObj, { sig = true, rawBody = null } = {}) {
+async function post(bodyObj, { sig = true, rawBody = null, env: envOverride = null } = {}) {
   const body = rawBody ?? JSON.stringify(bodyObj);
   const headers = { "content-type": "application/json" };
   if (sig) headers["x-agent-games-signature"] = sign(body);
   const t0 = Date.now();
-  const res = await worker.fetch(new Request(BASE + "/agent", { method: "POST", headers, body }), env);
+  const res = await worker.fetch(new Request(BASE + "/agent", { method: "POST", headers, body }), envOverride || env);
   const ms = Date.now() - t0;
   const text = await res.text();
   return { status: res.status, ms, body: text, sigHeader: res.headers.get("x-agent-games-signature") };
+}
+
+function mockKV() {
+  const m = new Map();
+  return {
+    get: async (k) => (m.has(k) ? m.get(k) : null),
+    put: async (k, v) => { m.set(k, v); },
+  };
 }
 
 function checkRespSig(r) {
@@ -113,6 +121,40 @@ console.log("== deadline passed fails closed ==");
   const r = await post(t);
   const j = JSON.parse(r.body);
   expect("late task rejected", j.decision === "REJECT", r.body);
+}
+
+console.log("== malformed input fails closed (strict types) ==");
+{
+  const rNull = await post(null, { rawBody: "null" });
+  expect("null envelope 400, no crash", rNull.status === 400, `got ${rNull.status} ${rNull.body}`);
+  const rBoolVk = await post(task("gk_t_boolvk", { proof_vk: true }, "0xaaa8000000000000000000000000000000000000000000000000000000000008"));
+  const jBoolVk = JSON.parse(rBoolVk.body);
+  expect("boolean proof_vk rejected VK_SUBSTITUTION", jBoolVk.decision === "REJECT" && jBoolVk.reason_code === "VK_SUBSTITUTION", rBoolVk.body);
+  const rBoolMin = await post(task("gk_t_boolmin", { minimum: true }, "0xaaa9000000000000000000000000000000000000000000000000000000000009"));
+  const jBoolMin = JSON.parse(rBoolMin.body);
+  expect("boolean minimum rejected THRESHOLD_MISMATCH", jBoolMin.decision === "REJECT" && jBoolMin.reason_code === "THRESHOLD_MISMATCH", rBoolMin.body);
+  const rNullAmt = await post(task("gk_t_nullamt", { amount: null }, "0xaaaa00000000000000000000000000000000000000000000000000000000000a"));
+  const jNullAmt = JSON.parse(rNullAmt.body);
+  expect("null amount rejected AMOUNT_OVERFLOW", jNullAmt.decision === "REJECT" && jNullAmt.reason_code === "AMOUNT_OVERFLOW", rNullAmt.body);
+}
+
+console.log("== durable idempotency via KV (cross-isolate retry) ==");
+{
+  const kv = mockKV();
+  const kvEnv = { AGENT_GAMES_HMAC_SECRET: SECRET, SEEN_PROOFS: kv };
+  const tx = "0xbbb1000000000000000000000000000000000000000000000000000000000001";
+  const r1 = await post(task("gk_kv_1", {}, tx), { env: kvEnv });
+  const j1 = JSON.parse(r1.body);
+  expect("first task APPROVEd", j1.decision === "APPROVE" && j1.reason_code === "VALID_CONDITION", r1.body);
+  // Simulate a different isolate: drop all in-memory state.
+  delete globalThis.__taskCache;
+  delete globalThis.__seenProofs;
+  const r2 = await post(task("gk_kv_1", {}, tx), { env: kvEnv });
+  const j2 = JSON.parse(r2.body);
+  expect("retry on fresh isolate replays stored APPROVE", j2.decision === "APPROVE" && j2.reason_code === "VALID_CONDITION", r2.body);
+  const r3 = await post(task("gk_kv_2", {}, tx), { env: kvEnv });
+  const j3 = JSON.parse(r3.body);
+  expect("same proof, new task rejected via KV seen-set", j3.decision === "REJECT" && j3.reason_code === "PROOF_REUSED", r3.body);
 }
 
 console.log(`\nRESULT: ${pass} passed, ${fail} failed`);
